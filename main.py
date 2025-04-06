@@ -1,13 +1,14 @@
+import os
 from langchain_ollama import ChatOllama, OllamaLLM
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate
-import os
+from langchain.schema.output_parser import StrOutputParser
 
 llm = ChatOllama(model="llama3.2", temperature=0.3,
                  base_url=os.environ.get("BASE_URL"))
 
-llm = OllamaLLM(model="llama3.2", temperature=0.3,
-                base_url=os.environ.get("BASE_URL"))
+# llm = OllamaLLM(model="llama3.2", temperature=0.3,
+#                 base_url=os.environ.get("BASE_URL"))
 
 python_code = ""
 
@@ -28,10 +29,11 @@ prompt_template = ChatPromptTemplate([
     ("human", python_code)
 ])
 
-prompt = prompt_template.invoke(
+# forming chains using LCEL (LangChain Expression Language)
+chain = prompt_template | llm | StrOutputParser()
+
+response = chain.invoke(
     {"source_language": "python", "target_language": "java"})
 
-response = llm.invoke(prompt)
-
 with open("Factorial3.java", "w") as f:
-    f.write(response.content)
+    f.write(response)
