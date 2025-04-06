@@ -1,12 +1,13 @@
 from langchain_ollama import ChatOllama, OllamaLLM
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate
+import os
 
 llm = ChatOllama(model="llama3.2", temperature=0.3,
-                 base_url="http://34.55.222.202:5400")
+                 base_url=os.environ.get("BASE_URL"))
 
-# llm = OllamaLLM(model="llama3.2", temperature=0.3,
-#                 base_url="http://34.55.222.202:5400")
+llm = OllamaLLM(model="llama3.2", temperature=0.3,
+                base_url=os.environ.get("BASE_URL"))
 
 python_code = ""
 
