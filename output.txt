@@ -1,0 +1,640 @@
+---------------------
+
+Filename: /media/anurag/mybkp/coderrank/coderrank-service/spring-boot-execute.sh
+
+#!/bin/bash
+
+dir_name=$1
+password=$2
+username=$3
+internal_ip=$4
+
+command="docker run --rm --network=none -i -v /home/anurag/codes/$dir_name:/app python:3.11-slim python3 /app/solution.py < /home/anurag/codes/$dir_name/input.txt"
+
+output=$(sshpass -p $password ssh -q -o StrictHostKeyChecking=no -t $username@$internal_ip "$command")
+
+echo $outputFilename: /media/anurag/mybkp/coderrank/coderrank-service/utils.py
+
+import org.springframework.http.HttpHeaders;
+import org.springframework.web.client.RestTemplate;
+import java.security.Key;
+import io.jsonwebtoken.JwtException;
+import io.jsonwebtoken.Jwts;
+
+public class Utils {
+
+    public static Object decodeToken(String token, String secret) {
+        Object decodedToken = new Object();
+        try {
+            decodedToken = Jwts.parser().setSigningKey(secret).parseClaimsJws(token).getBody();
+        } catch (JwtException e) {
+            return decodedToken;
+        }
+
+        return decodedToken;
+    }
+
+    public static String generateRandomSecretKey(int length) {
+        StringBuilder hexString = new StringBuilder();
+        for (int i = 0; i < length; i++) {
+            hexString.append(java.util.Random.nextString(16));
+        }
+        return hexString.toString();
+    }
+
+    public static boolean checkIsAdmin(HttpHeaders headers) {
+        RestTemplate restTemplate = new RestTemplate();
+        String response = restTemplate.getForObject("http://127.0.0.1:5000/verify-admin", String.class, headers);
+        return java.util.json.JSONObject.parseObject(response).getBoolean("is_admin");
+    }
+}Filename: pom.xml
+
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.example</groupId>
+    <artifactId>coderrank-service</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+    <packaging>jar</packaging>
+
+    <name>coderrank-service</name>
+    <description>coderrank service</description>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>2.6.5</version>
+        <relativePath/> <!-- lookup parent from repository -->
+    </parent>
+
+    <properties>
+        <java.version>11</java.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.amazonaws</groupId>
+            <artifactId>aws-java-sdk-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt</artifactId>
+            <version>0.9.1</version>
+        </dependency>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+
+</project>The provided code is a Flask application that appears to be part of an educational platform for programming concepts, specifically problem-solving and coding challenges. The application has various endpoints for managing problems, test cases, users, and other related data.
+
+Here are some observations and suggestions:
+
+1. **Organization**: The code is well-organized into logical sections, with each endpoint having its own function. However, the `if __name__ == "__main__":` block at the end seems out of place and could be removed.
+2. **Type Hints**: Adding type hints for function parameters and return types can improve code readability and help catch errors early.
+3. **Error Handling**: While there are some error messages in the code, they seem to be hardcoded or not very informative. Consider using more descriptive error messages and handling exceptions more robustly.
+4. **Security**: The application appears to use Flask's built-in support for JSON data, but it would be a good idea to consider additional security measures, such as validating user input and protecting against common web vulnerabilities like SQL injection or cross-site scripting (XSS).
+5. **Testing**: There are no tests provided in the code snippet. Consider adding unit tests and integration tests to ensure the application behaves correctly under different scenarios.
+6. **Database**: The code uses a database, but its schema is not shown. Make sure to document the database schema and consider using an ORM (Object-Relational Mapping) library like SQLAlchemy or Flask-SQLAlchemy to interact with the database.
+
+Here's an updated version of the `if __name__ == "__main__":` block that includes some basic error handling:
+```python
+if __name__ == "__main__":
+    try:
+        app.run(host="0.0.0.0", debug=True)
+    except Exception as e:
+        print(f"Error starting application: {e}")
+        exit(1)
+```
+This code will catch any exceptions that occur when running the application and print an error message before exiting with a non-zero status code.
+
+Additionally, consider adding some basic logging to help diagnose issues. You can use Flask's built-in `logging` module or a third-party library like Loguru.
+```python
+import logging
+
+logging.basicConfig(level=logging.INFO)
+
+try:
+    app.run(host="0.0.0.0", debug=True)
+except Exception as e:
+    logging.error(f"Error starting application: {e}")
+    exit(1)
+```
+This will log the error message at the INFO level, which can help you diagnose issues without flooding your logs with too much information.---------------------
+
+Filename: Dockerfile
+
+FROM maven:3.6.0
+
+# Install dependencies for Maven and sshpass
+RUN apt-get update && apt-get install -y sshpass openssh-client
+
+# Set up working directory
+WORKDIR /app
+
+# Copy the application code
+COPY . .
+
+# Install Java dependencies
+RUN mvn dependency:resolve
+
+RUN mkdir /home/codes
+
+# Ensure scripts have the proper permissions
+RUN chmod 777 ./code-execute.sh
+
+# Expose the Spring Boot app port
+EXPOSE 8080
+
+# Default command to run the Spring Boot app
+CMD ["mvn", "spring-boot:run"]Filename: DatabaseUtils.java
+
+import java.util.HashMap;
+import java.util.Map;
+
+public class DatabaseUtils {
+
+    public static Map<String, String> userUpdateFields() {
+        return new HashMap<>() {{
+            put("full_name", "user_metadata.user_name");
+            put("user_alias", "user_metadata.user_alias");
+            put("user_password", "user_metadata.user_password");
+            put("phone_no", "user_metadata.user_phone_no");
+            put("email", "user_metadata.user_email");
+            put("no_of_times_user_login", "user_metadata.no_of_times_user_login");
+            put("no_of_problems_solved", "user_metadata.no_of_problems_solved");
+            put("is_admin", "user_metadata.is_admin");
+        }};
+    }
+
+    public static Map<String, String> problemUpdateFields() {
+        return new HashMap<>() {{
+            put("statement_body", "problem_statement_metadata.problem_statement_body");
+            put("sample_input", "problem_statement_metadata.sample_input");
+            put("sample_output", "problem_statement_metadata.sample_output");
+            put("duration", "problem_statement_metadata.problem_duration");
+            put("no_of_test_cases", "problem_statement_metadata.no_of_test_cases");
+        }};
+    }
+
+    public static Map<String, String> problemTestcasesUpdateFields() {
+        return new HashMap<>() {{
+            put("expected_input", "problem_statement_test_cases.expected_input");
+            put("expected_output", "problem_statement_test_cases.expected_output");
+            put("test_case_weightage", "problem_statement_test_cases.test_case_weightage");
+            put("is_hidden", "problem_statement_test_cases.is_hidden");
+        }};
+    }
+}Filename: com.coderrank.db.model.UserMetadata.java
+
+import org.springframework.data.jpa.domain.support.JpaEntityInformation;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+import javax.persistence.Entity;
+import javax.persistence.Id;
+import javax.persistence.Table;
+import java.util.UUID;
+
+@Entity
+@Table(name = "user_metadata")
+@Repository
+public class UserMetadata {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Integer user_id;
+
+    private String user_name;
+
+    private String user_alias;
+
+    private String user_password;
+
+    private String user_phone_no;
+
+    private String user_email;
+
+    private Integer no_of_times_user_login;
+
+    private Integer no_of_problems_solved;
+
+    private Boolean is_admin;
+
+    @ManyToOne
+    @JoinColumn(name = "user_id", nullable = false)
+    private UserMaster user_master;
+
+    public Integer getUser_id() {
+        return user_id;
+    }
+
+    public void setUser_id(Integer user_id) {
+        this.user_id = user_id;
+    }
+
+    public String getUser_name() {
+        return user_name;
+    }
+
+    public void setUser_name(String user_name) {
+        this.user_name = user_name;
+    }
+
+    public String getUser_alias() {
+        return user_alias;
+    }
+
+    public void setUser_alias(String user_alias) {
+        this.user_alias = user_alias;
+    }
+
+    public String getUser_password() {
+        return user_password;
+    }
+
+    public void setUser_password(String user_password) {
+        this.user_password = user_password;
+    }
+
+    public String getUser_phone_no() {
+        return user_phone_no;
+    }
+
+    public void setUser_phone_no(String user_phone_no) {
+        this.user_phone_no = user_phone_no;
+    }
+
+    public String getUser_email() {
+        return user_email;
+    }
+
+    public void setUser_email(String user_email) {
+        this.user_email = user_email;
+    }
+
+    public Integer getNo_of_times_user_login() {
+        return no_of_times_user_login;
+    }
+
+    public void setNo_of_times_user_login(Integer no_of_times_user_login) {
+        this.no_of_times_user_login = no_of_times_user_login;
+    }
+
+    public Integer getNo_of_problems_solved() {
+        return no_of_problems_solved;
+    }
+
+    public void setNo_of_problems_solved(Integer no_of_problems_solved) {
+        this.no_of_problems_solved = no_of_problems_solved;
+    }
+
+    public Boolean getIs_admin() {
+        return is_admin;
+    }
+
+    public void setIs_admin(Boolean is_admin) {
+        this.is_admin = is_admin;
+    }
+
+    public UserMaster getUser_master() {
+        return user_master;
+    }
+
+    public void setUser_master(UserMaster user_master) {
+        this.user_master = user_master;
+    }
+}
+
+Filename: com.coderrank.db.model.UserMaster.java
+
+import org.springframework.data.jpa.domain.support.JpaEntityInformation;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+import javax.persistence.Entity;
+import javax.persistence.Id;
+import javax.persistence.Table;
+import java.util.UUID;
+
+@Entity
+@Table(name = "user_master")
+@Repository
+public class UserMaster {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Integer user_id;
+
+    private String user_uuid;
+
+    @ManyToOne
+    @JoinColumn(name = "user_id", nullable = false)
+    private UserMetadata user_metadata;
+
+    public Integer getUser_id() {
+        return user_id;
+    }
+
+    public void setUser_id(Integer user_id) {
+        this.user_id = user_id;
+    }
+
+    public String getUser_uuid() {
+        return user_uuid;
+    }
+
+    public void setUser_uuid(String user_uuid) {
+        this.user_uuid = user_uuid;
+    }
+
+    public UserMetadata getUser_metadata() {
+        return user_metadata;
+    }
+
+    public void setUser_metadata(UserMetadata user_metadata) {
+        this.user_metadata = user_metadata;
+    }
+}
+
+Filename: com.coderrank.db.model.LanguageInfo.java
+
+import org.springframework.data.jpa.domain.support.JpaEntityInformation;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+import javax.persistence.Entity;
+import javax.persistence.Id;
+import javax.persistence.Table;
+import java.util.UUID;
+
+@Entity
+@Table(name = "language_info")
+@Repository
+public class LanguageInfo {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Integer language_id;
+
+    private String language_name;
+
+    @ManyToOne
+    @JoinColumn(name = "language_id", nullable = false)
+    private UserDidProblem user_did_problem;
+
+    public Integer getLanguage_id() {
+        return language_id;
+    }
+
+    public void setLanguage_id(Integer language_id) {
+        this.language_id = language_id;
+    }
+
+    public String getLanguage_name() {
+        return language_name;
+    }
+
+    public void setLanguage_name(String language_name) {
+        this.language_name = language_name;
+    }
+
+    public UserDidProblem getUser_did_problem() {
+        return user_did_problem;
+    }
+
+    public void setUser_did_problem(UserDidProblem user_did_problem) {
+        this.user_did_problem = user_did_problem;
+    }
+}
+
+Filename: com.coderrank.db.model.UserDidProblem.java
+
+import org.springframework.data.jpa.domain.support.JpaEntityInformation;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+import javax.persistence.Entity;
+import javax.persistence.Id;
+import javax.persistence.Table;
+import java.util.UUID;
+
+@Entity
+@Table(name = "user_did_problem")
+@Repository
+public class UserDidProblem {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Integer user_id;
+
+    private String user_name;
+
+    private String user_email;
+
+    private Integer problem_id;
+
+    @ManyToOne
+    @JoinColumn(name = "language_id", nullable = false)
+    private LanguageInfo language_info;
+
+    public Integer getUser_id() {
+        return user_id;
+    }
+
+    public void setUser_id(Integer user_id) {
+        this.user_id = user_id;
+    }
+
+    public String getUser_name() {
+        return user_name;
+    }
+
+    public void setUser_name(String user_name) {
+        this.user_name = user_name;
+    }
+
+    public String getUser_email() {
+        return user_email;
+    }
+
+    public void setUser_email(String user_email) {
+        this.user_email = user_email;
+    }
+
+    public Integer getProblem_id() {
+        return problem_id;
+    }
+
+    public void setProblem_id(Integer problem_id) {
+        this.problem_id = problem_id;
+    }
+
+    public LanguageInfo getLanguage_info() {
+        return language_info;
+    }
+
+    public void setLanguage_info(LanguageInfo language_info) {
+        this.language_info = language_info;
+    }
+}
+
+Filename: com.coderrank.db.model.User.java
+
+import org.springframework.data.jpa.domain.support.JpaEntityInformation;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+import javax.persistence.Entity;
+import javax.persistence.Id;
+import javax.persistence.Table;
+import java.util.UUID;
+
+@Entity
+@Table(name = "users")
+@Repository
+public class User {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Integer id;
+
+    private String name;
+
+    private String email;
+
+    public Integer getId() {
+        return id;
+    }
+
+    public void setId(Integer id) {
+        this.id = id;
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public void setName(String name) {
+        this.name = name;
+    }
+
+    public String getEmail() {
+        return email;
+    }
+
+    public void setEmail(String email) {
+        this.email = email;
+    }
+}
+
+Filename: com.coderrank.db.model.Problem.java
+
+import org.springframework.data.jpa.domain.support.JpaEntityInformation;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+import javax.persistence.Entity;
+import javax.persistence.Id;
+import javax.persistence.Table;
+import java.util.UUID;
+
+@Entity
+@Table(name = "problems")
+@Repository
+public class Problem {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Integer id;
+
+    private String name;
+
+    public Integer getId() {
+        return id;
+    }
+
+    public void setId(Integer id) {
+        this.id = id;
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public void setName(String name) {
+        this.name = name;
+    }
+}
+
+Filename: com.coderrank.db.model.UserProblem.java
+
+import org.springframework.data.jpa.domain.support.JpaEntityInformation;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+import javax.persistence.Entity;
+import javax.persistence.Id;
+import javax.persistence.Table;
+import java.util.UUID;
+
+@Entity
+@Table(name = "user_problems")
+@Repository
+public class UserProblem {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Integer user_id;
+
+    private String problem_name;
+
+    public Integer getUser_id() {
+        return user_id;
+    }
+
+    public void setUser_id(Integer user_id) {
+        this.user_id = user_id;
+    }
+
+    public String getProblem_name() {
+        return problem_name;
+    }
+
+    public void setProblem_name(String problem_name) {
+        this.problem_name = problem_name;
+    }
+}
