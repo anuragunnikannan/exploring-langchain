@@ -1,0 +1,1384 @@
+
+
+Filename: /media/anurag/mybkp/coderrank/coderrank-service/code-execute.sh
+
+#!/bin/bash
+
+dir_name=$1
+password=$2
+username=$3
+internal_ip=$4
+mode=$5
+language=$6
+
+command="echo $password | sudo -S -p '' bash -c 'docker run --rm --network=none --memory=128m -i -v /home/anurag/codes/$dir_name:/codes/ coderrank-execution-service python3 runner.py $mode $language'"
+
+output=`sshpass -p $password ssh -q -o StrictHostKeyChecking=no -t $username@$internal_ip $command`
+
+echo $output
+
+----------------------------------
+
+
+
+Filename: /media/anurag/mybkp/coderrank/coderrank-service/python-execute.sh
+
+#!/bin/bash
+
+dir_name=$1
+password=$2
+username=$3
+internal_ip=$4
+
+command="echo $password | sudo -S -p '' bash -c 'docker run --rm --network=none -i -v /home/anurag/codes/$dir_name:/app python:3.11-slim python3 /app/solution.py < /home/anurag/codes/$dir_name/input.txt'"
+
+
+output=`sshpass -p $password ssh -q -o StrictHostKeyChecking=no -t $username@$internal_ip $command`
+
+echo $output
+
+----------------------------------
+
+
+
+Filename: /media/anurag/mybkp/coderrank/coderrank-service/utils.py
+
+import jwt, random, string, requests
+
+def decode_token(token, secret):
+    decoded_token = {"user_uuid": "", "sub": ""}
+    try:
+        decoded_token = jwt.decode(token, algorithms=["HS256"], key=secret)
+    except Exception as e:
+        return decoded_token
+
+    return decoded_token
+
+def generate_random_secret_key(length):
+    hexString = string.hexdigits
+    return ''.join(random.choice(hexString) for i in range(length))
+
+def check_is_admin(headers):
+    response = requests.get("http://127.0.0.1:5000/verify-admin", headers=headers)
+    is_admin = response.json()["is_admin"]
+    return is_admin
+
+----------------------------------
+
+
+
+Filename: /media/anurag/mybkp/coderrank/coderrank-service/requirements.txt
+
+bcrypt==4.2.0
+blinker==1.8.2
+certifi==2024.8.30
+cffi==1.17.0
+charset-normalizer==3.3.2
+click==8.1.7
+cryptography==43.0.0
+docker==7.1.0
+Flask==3.0.3
+Flask-Cors==4.0.1
+Flask-JWT-Extended==4.6.0
+Flask-WTF==1.2.1
+greenlet==3.1.0
+idna==3.8
+itsdangerous==2.2.0
+Jinja2==3.1.4
+MarkupSafe==2.1.5
+psycopg2-binary==2.9.9
+pycparser==2.22
+PyJWT==2.9.0
+PyNaCl==1.5.0
+requests==2.32.3
+SQLAlchemy==2.0.35
+typing_extensions==4.12.2
+urllib3==2.2.2
+Werkzeug==3.0.3
+WTForms==3.1.2
+
+
+----------------------------------
+
+
+
+Filename: /media/anurag/mybkp/coderrank/coderrank-service/app.py
+
+from flask import Flask, jsonify, request, make_response
+from flask_cors import CORS
+import subprocess
+import docker
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, joinedload
+from database_utils.models import LanguageInfo, UserMetadata, UserMaster, ProblemStatementMaster, ProblemStatementMetadata, ProblemStatementTestCases, BlacklistedTokens, UserDidProblem
+import uuid
+from database_utils.dbUtils import user_update_fields, problem_update_fields, problem_testcases_update_fields
+from werkzeug.security import generate_password_hash, check_password_hash
+import logging
+from flask_jwt_extended import JWTManager, create_access_token, create_refresh_token, jwt_required, get_jwt_identity
+from datetime import timedelta, datetime
+import os
+import utils
+import requests
+import json
+
+app = Flask(__name__)
+CORS(app, supports_credentials=True)
+
+environment = os.environ.get("env") if os.environ.get("env") else "local"
+db_username = os.environ.get("db_username") if os.environ.get("db_username") else "postgres"
+db_password = os.environ.get("db_password") if os.environ.get("db_password") else "password"
+vm_host = os.environ.get("vm_host")
+vm_port = os.environ.get("vm_port") if os.environ.get("vm_port") else "5432"
+db_name = os.environ.get("db_name") if os.environ.get("db_name") else "coderrank_db"
+vm_password = os.environ.get("vm_password")
+vm_username = os.environ.get("vm_username")
+
+#Db configuration
+DATABASE_URL = f"postgresql://{db_username}:{db_password}@{vm_host}:{vm_port}/{db_name}"
+print(DATABASE_URL)
+db_engine = create_engine(DATABASE_URL)
+db_session = sessionmaker(bind=db_engine)
+db_session_ac = db_session() #dbSession object
+
+
+# Logging configuration
+logging.basicConfig(format="{asctime} - {levelname} - {message}", style="{", datefmt="%Y-%m-%d %H:%M:%S")
+
+# JWT config
+jwt = JWTManager(app)
+# print(utils.generate_random_secret_key(32))
+# jwt_secret_key = os.popen("openssl rand -hex 32").read()
+jwt_secret_key = utils.generate_random_secret_key(32)
+app.config["JWT_SECRET_KEY"] = jwt_secret_key
+app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(minutes=5)
+app.config["JWT_REFRESH_TOKEN_EXPIRES"] = timedelta(minutes=30)
+app.config["JWT_TOKEN_LOCATION"] = ["cookies", "headers"]
+app.config['JWT_COOKIE_CSRF_PROTECT'] = False
+
+#api to fetch all supported languages, language_id param to be used as primary key for testcases
+@app.route('/get-language-options', methods=["GET"])
+def get_language_options():
+    try:
+        languages = db_session_ac.query(LanguageInfo).all()
+        return_body = []
+        for items in languages:
+            temp = {
+                "language_id": items.language_id,
+                "language_name" : items.language_name,
+            }
+            return_body.append(temp)
+        return jsonify(return_body), 200
+    except Exception as e:
+        return jsonify({'error' : e}), 400
+
+@app.route('/add-language-options', methods=['POST'])
+def add_language_options():
+    data = request.json
+    user_id = data['user_id']
+    language_options = data['language_options']
+
+    isUserAdmin = db_session_ac.query(UserMaster).filter_by(user_uuid=user_id).first().user_metadata.is_admin
+
+    if(isUserAdmin):
+
+        errorFlag = False
+
+        for ele in language_options:
+            temp_uuid = uuid.uuid4()
+            langObj = LanguageInfo(
+                language_name=ele.language_name
+            )
+            try:
+                db_session_ac.add(langObj)
+                db_session_ac.commit()
+            except Exception as e:
+                errorFlag = True
+                print(e)
+                break
+        
+        if(errorFlag):
+            return jsonify({'message' : 'failed to add languages'}), 400
+        else:
+            return jsonify({'message' : 'added language info successfully'}), 200
+    else:
+        return jsonify({'message' : 'privillege escalation attempted'}), 403
+
+
+
+def invoke_execution_service(code, input, user_uuid, vm_password, vm_username, vm_host, mode, language_name):
+    output = ""
+
+    os.makedirs(os.path.dirname(f"/home/codes/{user_uuid}/"), exist_ok=True)
+
+    language_filename_mapping = {
+        "java": "Solution.java",
+        "python": "solution.py",
+        "cpp": "solution.cpp",
+        "javascript": "solution.js"
+    }
+
+    with open(f"/home/codes/{user_uuid}/{language_filename_mapping[language_name]}", "w") as f:
+        f.write(code)
+    
+    if mode == "run":
+        with open(f"/home/codes/{user_uuid}/input.txt", "w") as f:
+            f.write(input)
+    elif mode == "submit":
+        with open(f"/home/codes/{user_uuid}/test_cases.json", "w") as f:
+            f.write(input)
+
+    output = subprocess.run(["./code-execute.sh", user_uuid, vm_password, vm_username, vm_host, mode, language_name], capture_output=True)
+
+    stdout = output.stdout.decode().strip()
+    stderr = output.stderr.decode().strip()
+    
+    response = ""
+    if len(stderr) > len(stdout):
+        response = stderr
+    else:
+        response = stdout
+    
+    return response
+    
+
+@app.route("/run-code", methods=["POST"])
+def run_code():
+    data = request.get_json()
+    language_id = data["language_id"]
+    code = data["code"]
+    input = data["input"] + "\n"
+    user_uuid = ""
+
+    # fetching user_uuid by decoding jwt if user has logged in
+    if "refresh_token_cookie" in request.cookies:
+        user_uuid = utils.decode_token(request.headers["Authorization"].split()[1], jwt_secret_key)["user_uuid"]
+    
+    # using guest_id as user_uuid if user has not logged in
+    elif "guest_id" in data:
+        user_uuid = f"guest_{data['guest_id']}"
+    else:
+        logging.error("Bad Request, couldn't fetch uuid")
+        return jsonify({"message": "No uuid found"}), 400
+    
+    language_name = db_session_ac.query(LanguageInfo).filter_by(language_id=language_id).first().language_name
+
+    output = invoke_execution_service(code, input, user_uuid, vm_password, vm_username, vm_host, "run", language_name.lower())
+    return jsonify(output)
+
+# code execution through docker exec
+@app.route('/execute_code_docker', methods=['POST'])
+def execute_code():
+    client = docker.from_env()
+    data = request.json
+    container_id = "239d386b5caa8fd0154b0830f31571c14acb024d240b23aa59a2ee980e272ff4"
+    code = data["code"]
+    language = data["language"].lower()
+    user_input = data.get("input", "")
+
+    if not container_id or not language or not code:
+        return jsonify({"error": "language, code, and input are required"}), 400
+
+    try:
+        container = client.containers.get(container_id)
+
+        if language == 'python':
+            local_file_path = "./codes/app.py"
+            container_file_path = "/app.py"
+
+            with open(local_file_path, "w") as f:
+                f.write(code)
+            with open("./codes/input.txt", "w") as f:
+                f.write(user_input)
+
+            subprocess.run(['docker', 'cp', local_file_path, f'{container_id}:{container_file_path}'], check=True)
+            subprocess.run(['docker', 'cp', "./codes/input.txt", f'{container_id}:{"/input.txt"}'], check=True)
+
+            exec_cmd = f'python app.py < input.txt'
+            result = container.exec_run(
+                ['sh', '-c', exec_cmd],
+                stdout=True,
+                stderr=True
+            )
+            return jsonify({"output": result.output.decode('utf-8')}), 200
+
+        elif language == 'java':
+            # Write Java code to a file on the host machine containing compilers
+            local_file_path = "./codes/Solution.java"
+            container_file_path = "/Solution.java"
+            with open(local_file_path, "w") as f:
+                f.write(code)
+            with open("./codes/input.txt", "w") as f:
+                f.write(user_input)
+
+            # Copy the Java file to the container on the host machine containing compilers
+            subprocess.run(['docker', 'cp', local_file_path, f'{container_id}:{container_file_path}'], check=True)
+            subprocess.run(['docker', 'cp', "./codes/input.txt", f'{container_id}:{"/input.txt"}'], check=True)
+
+            # Compile the Java file inside the container and pass the input
+            exec_cmd = f'javac Solution.java && java Solution < input.txt'
+            result = container.exec_run(['sh', '-c', exec_cmd], stdin=True, stdout=True, stderr=True)
+
+            return jsonify({"output": result.output.decode('utf-8')}), 200
+
+        else:
+            return jsonify({"error": "Unsupported language"}), 400
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/submit-code", methods=["POST"])
+@jwt_required()
+def submit_code():
+    data = request.json
+    language_id = data["language_id"]
+    code = data["code"]
+    problem_statement_uuid = data["problem_statement_id"]
+    user_uuid = utils.decode_token(request.headers["Authorization"].split()[1], secret=jwt_secret_key)["user_uuid"]
+
+    # fetching all necessary data for code execution
+    language_name = db_session_ac.query(LanguageInfo).filter_by(language_id=language_id).first().language_name
+
+    problem_statement_id = db_session_ac.query(ProblemStatementMaster).filter_by(problem_statement_uuid=problem_statement_uuid).first().problem_statement_id
+
+    test_cases_list = db_session_ac.query(ProblemStatementTestCases).filter_by(problem_statement_id=problem_statement_id).all()
+
+    total_test_cases = len(test_cases_list)
+    test_cases_passed = 0
+    hidden_test_cases_count = 0
+
+    response = {"test_cases": []}
+
+    # creating test cases json after querying test_cases table
+    temp = {"inputs": []}
+    for i in test_cases_list:
+        temp["inputs"].append(i.input+"\n")
+    
+    # converting dictionary to string so as to write it to a file
+    input = json.dumps(temp)
+    logging.error(input)
+    
+    output = invoke_execution_service(code, input, user_uuid, vm_password, vm_username, vm_host, "submit", language_name.lower())
+
+    # converting string output to dictionary
+    logging.error(output)
+    res = json.loads(output)
+
+    for i in range(len(test_cases_list)):
+        temp = {}
+        flag = False
+        
+        if res["compilation_status"] != "failed":
+            if res["outputs"][i] == test_cases_list[i].expected_output:
+                test_cases_passed += 1
+                flag = True
+
+        if not test_cases_list[i].is_hidden:
+            temp["input"] = test_cases_list[i].input
+            temp["output"] = res["outputs"][i] if res["compilation_status"] != "failed" else res["outputs"][0]
+            temp["expected_output"] = test_cases_list[i].expected_output
+            temp["passed"] = flag
+            response["test_cases"].append(temp)
+        else:
+            hidden_test_cases_count += 1
+        
+
+    response["test_cases_passed"] = test_cases_passed
+    response["total_test_cases"] = total_test_cases
+    response["hidden_test_cases_count"] = hidden_test_cases_count
+
+    user_id = db_session_ac.query(UserMaster).filter_by(user_uuid=user_uuid).first().user_id
+    user_did_problem_obj = db_session_ac.query(UserDidProblem).filter_by(user_id=user_id, problem_statement_id=problem_statement_id, language_id=language_id).first()
+
+    # logic for user's tracking for problem statement
+    try:
+        if user_did_problem_obj:
+            if user_did_problem_obj.test_cases_passed <= test_cases_passed:
+                user_did_problem_obj.code = code
+                user_did_problem_obj.test_cases_passed = test_cases_passed
+                user_did_problem_obj.total_test_cases = total_test_cases
+
+                db_session_ac.commit()
+        else:
+            new_user_did_problem_obj = UserDidProblem(user_id=user_id, problem_statement_id=problem_statement_id, language_id=language_id, code=code, total_test_cases=total_test_cases, test_cases_passed=test_cases_passed)
+
+            db_session_ac.add(new_user_did_problem_obj)
+            db_session_ac.commit()
+        
+        return jsonify(response)
+    
+    except Exception as e:
+        logging.error(e)
+        return jsonify({"message": "Something went wrong"}), 500
+
+@app.route("/get-users-code/<int:language_id>/<string:problem_statement_uuid>", methods=["GET"])
+@jwt_required()
+def get_users_code(language_id, problem_statement_uuid):
+    try:
+        user_uuid = utils.decode_token(request.headers["Authorization"].split()[1], secret=jwt_secret_key)["user_uuid"]
+        user_id = db_session_ac.query(UserMaster).filter_by(user_uuid=user_uuid).first().user_id
+        problem_statement_id = db_session_ac.query(ProblemStatementMaster).filter_by(problem_statement_uuid=problem_statement_uuid).first().problem_statement_id
+
+        response = {}
+        user_did_problem_obj = db_session_ac.query(UserDidProblem).filter_by(user_id=user_id, problem_statement_id=problem_statement_id, language_id=language_id).first()
+
+        if user_did_problem_obj:
+            response["code"] = user_did_problem_obj.code
+        else:
+            response["code"] = ""
+        
+        return jsonify(response)
+    except Exception as e:
+        logging.error(e)
+        return jsonify({"message": "Something went wrong"})
+    
+
+
+@app.route('/generate-guest-id', methods=['GET'])
+def generate_guest_id():
+    guest_id = uuid.uuid4()
+    return jsonify({"guest_id": guest_id})
+
+#user-end apis
+@app.route('/login-user', methods=['POST'])
+def user_login():
+    data = request.json
+    user_alias = data["user_alias"] #username == actual name && user_alias == username given by user, eg:Dedsec Potter, CoderMaster69
+    password = data["password"]
+    try:
+        users = db_session_ac.query(UserMetadata).filter_by(user_alias=user_alias).all()
+        if users and check_password_hash(users[0].user_password, password):
+            user_id = users[0].user_id
+            user_master_data = db_session_ac.query(UserMaster).filter_by(user_id=user_id).all()
+            user_uuid = user_master_data[0].user_uuid
+            is_user_admin = user_master_data[0].user_metadata.is_admin
+
+            users[0].no_of_times_user_login += 1
+            db_session_ac.commit()
+
+            access_token = create_access_token(identity=user_alias, additional_claims={"user_uuid": user_uuid})
+            refresh_token = create_refresh_token(identity=user_alias, additional_claims={"user_uuid": user_uuid})
+            
+            response = make_response(jsonify({'message': 'Logged in successfully', 'admin_user' : is_user_admin, "access_token": access_token, "refresh_token": refresh_token}))
+
+            if environment == "local": 
+                response.set_cookie("refresh_token_cookie", refresh_token, httponly=True, secure=True, samesite="None", max_age=timedelta(minutes=30))
+            else:
+                response.set_cookie("refresh_token_cookie", refresh_token, httponly=True, max_age=timedelta(minutes=30))
+            return response
+        else:
+            return jsonify({'message': 'Username or password is incorrect'}), 400
+    except Exception as e:
+        print(e)
+        logging.error(e)
+        return jsonify({'message': 'Failed to login user'}), 500
+
+@app.route("/renew-token", methods=["POST"])
+@jwt_required(refresh=True)
+def renew_token():
+    try:
+        identity = get_jwt_identity()
+        refresh_token = request.cookies["refresh_token_cookie"]
+        if db_session_ac.query(BlacklistedTokens).filter_by(blacklisted_token=str(hash(refresh_token))).count() != 0:
+            return jsonify({"message": "Token expired or invalid"}), 401
+
+        user_uuid = utils.decode_token(refresh_token, jwt_secret_key)["user_uuid"]
+        print(user_uuid)
+        new_access_token =  create_access_token(identity, additional_claims={"user_uuid": user_uuid})
+
+        return jsonify({"access_token": new_access_token})
+    
+    except Exception as e:
+        logging.error(e)
+        return jsonify({"message": "Something went wrong"}), 500
+
+@app.route('/register-user', methods=['POST'])
+def user_registration():
+    data = request.json
+    user_uuid = uuid.uuid4()
+    name = data['full_name']
+    user_alias = data['user_alias']
+    password = generate_password_hash(data['user_password'])
+    phone = data['phone_no']
+    email = data['email']
+
+    users = db_session_ac.query(UserMetadata).filter_by(user_alias=user_alias).all()
+    if users:
+        return jsonify({"message": "This username already exists, please try a different one"}), 400
+
+    new_user_master = UserMaster(
+        user_uuid=user_uuid
+    )
+
+    new_user_metadata = UserMetadata(
+        user_name=name,
+        user_alias=user_alias,
+        user_password=password,
+        user_phone_no=phone,
+        user_email=email,
+        no_of_times_user_login=0,
+        no_of_problems_solved=0,
+        is_admin=False
+    )
+
+    new_user_master.user_metadata = new_user_metadata
+
+    try:
+        db_session_ac.add(new_user_master)
+        db_session_ac.commit()
+        return jsonify({'message': 'User registered successfully'}), 200
+    except Exception as e:
+        db_session_ac.rollback()
+        logging.error(e)
+        return jsonify({'message': 'Failed to register'}), 500
+
+@app.route("/logout", methods=["POST"])
+@jwt_required(refresh=True)
+def logout():
+    try:
+        refresh_token = request.cookies["refresh_token_cookie"]
+        bt = BlacklistedTokens(blacklisted_token=hash(refresh_token), blacklisted_timestamp=datetime.now())
+        db_session_ac.add(bt)
+        db_session_ac.commit()
+        response = make_response(jsonify({"message": "Logout successful"}))
+        if environment == "local": 
+            response.set_cookie("refresh_token_cookie", refresh_token, httponly=True, secure=True, samesite="None", max_age=timedelta(minutes=0))
+        else:
+            response.set_cookie("refresh_token_cookie", refresh_token, httponly=True, max_age=timedelta(minutes=0))
+        
+        blacklisted_tokens = db_session_ac.query(BlacklistedTokens).all()
+        
+        for i, value in enumerate(blacklisted_tokens):
+            current_time = datetime.now()
+            time_difference = current_time - value.blacklisted_timestamp
+            if (time_difference.seconds / 60) > 30:
+                db_session_ac.delete(value)        
+        
+        db_session_ac.commit()
+        return response
+    except Exception as e:
+        logging.error(e)
+        return jsonify({"message": "Something went wrong"}), 500
+    
+@app.route("/verify-admin")
+@jwt_required()
+def verify_admin():
+    token = request.headers['Authorization'].split()[1]
+    user_uuid = utils.decode_token(token, secret=jwt_secret_key)["user_uuid"]
+
+    is_admin = db_session_ac.query(UserMaster).filter_by(user_uuid=user_uuid).first().user_metadata.is_admin
+    
+    return jsonify({
+        "is_admin": is_admin
+    })
+
+@app.route("/get-user-data", methods=['GET'])
+@jwt_required()
+def get_user_data():
+    response = {}
+    try:
+        token = request.headers['Authorization'].split()[1]
+        user_alias = utils.decode_token(token, secret=jwt_secret_key)["sub"]
+
+        user_data = db_session_ac.query(UserMetadata).filter_by(user_alias=user_alias).first()
+        response = {
+            "message": "User details fetched successfully",
+            "user_id": user_data.user_id,
+            "user_name": user_data.user_name,
+            "user_phone_no": user_data.user_phone_no,
+            "user_email": user_data.user_email,
+            "no_of_times_user_login": user_data.no_of_times_user_login,
+            "no_of_problems_solved": user_data.no_of_problems_solved,
+            "is_admin": user_data.is_admin
+        }
+
+        return jsonify(response)
+    except Exception as e:
+        logging.error(e)
+        response = {
+            "message": "Something went wrong"
+        }
+        return jsonify(response), 500
+
+@app.route('/user-details-list/', defaults={'user_uuid': None}, methods=['GET'])
+@app.route('/user-details-list/<string:user_uuid>', methods=['GET'])
+@jwt_required()
+def get_user_details_list(user_uuid):
+    if user_uuid is None:
+        userDetails = db_session_ac.query(UserMaster).options(joinedload(UserMaster.user_metadata)).all()
+        resBody = []
+        for users in userDetails:
+            temp = {
+                'user_id' : users.user_uuid,
+                "full_name" : users.user_metadata.user_name,
+                "user_alias" : users.user_metadata.user_alias,
+                "phone_no" : users.user_metadata.user_phone_no,
+                "email" : users.user_metadata.user_email,
+                "user_login_count" : users.user_metadata.no_of_times_user_login,
+                "problem_solved_count" : users.user_metadata.no_of_problems_solved,
+                "is_admin": str(users.user_metadata.is_admin)
+                
+            }
+            resBody.append(temp)
+
+        # print(resBody)
+        return jsonify(resBody), 200
+    else:
+        try:
+            userDetails = db_session_ac.query(UserMaster).options(joinedload(UserMaster.user_metadata)).filter_by(user_uuid=user_uuid).first()
+            temp = {
+                        'user_id' : userDetails.user_uuid,
+                        "full_name" : userDetails.user_metadata.user_name,
+                        "user_alias" : userDetails.user_metadata.user_alias,
+                        "phone_no" : userDetails.user_metadata.user_phone_no,
+                        "email" : userDetails.user_metadata.user_email,
+                        "user_login_count" : userDetails.user_metadata.no_of_times_user_login,
+                        "problem_solved_count" : userDetails.user_metadata.no_of_problems_solved,
+                        "is_admin": str(userDetails.user_metadata.is_admin)
+                        
+                    }
+            return jsonify(temp), 200
+        except Exception as e:
+            logging.error(e)
+            return jsonify({"message": "User not found"}), 404
+
+@app.route('/delete-user', methods=['DELETE'])
+@jwt_required()
+def delete_user():
+    data = request.json
+    user_to_be_deleted = data['user_to_be_deleted']
+    requester_id = utils.decode_token(request.headers["Authorization"].split()[1], jwt_secret_key)["user_uuid"]
+
+    requestedUser = db_session_ac.query(UserMaster).filter_by(user_uuid=user_to_be_deleted).first()
+
+    if(requestedUser):
+
+        if(requester_id == user_to_be_deleted): #user self-delete logic
+            try:
+                db_session_ac.delete(requestedUser)
+                db_session_ac.commit()
+                response = make_response(jsonify({'message': 'User deleted successfully', 'self_delete': 'true'}))
+                
+                refresh_token = request.cookies["refresh_token_cookie"]
+                bt = BlacklistedTokens(blacklisted_token=hash(refresh_token), blacklisted_timestamp=datetime.now())
+                db_session_ac.add(bt)
+                db_session_ac.commit()
+                
+                if environment == "local": 
+                    response.set_cookie("refresh_token_cookie", refresh_token, httponly=True, secure=True, samesite="None", max_age=timedelta(minutes=0))
+                else:
+                    response.set_cookie("refresh_token_cookie", refresh_token, httponly=True, max_age=timedelta(minutes=0))
+                    
+                return response
+            except Exception as e:
+                logging.error(e)
+                return jsonify({'message': 'Cannot delete user, user does not exist'}), 404
+        
+        else: #admin deletes user logic
+            requesterUser = db_session_ac.query(UserMaster).filter_by(user_uuid=requester_id).first()
+            is_admin = utils.check_is_admin(request.headers)
+            if(requesterUser and is_admin):
+                db_session_ac.delete(requestedUser)
+                db_session_ac.commit()
+                return jsonify({'message': 'User deleted successfully', 'self_delete': 'false'}), 200
+            else:
+                return jsonify({'message': 'Cannot delete user, user unauthorized or does not exist'}), 403
+    
+    else:
+        return jsonify({"message": "User not found"}), 404
+
+@app.route('/edit-user', methods=['PUT'])
+@jwt_required()
+def edit_user():
+    data = request.json
+    user_to_be_edited = data['user_to_be_edited']
+    requester_id = utils.decode_token(request.headers["Authorization"].split()[1], secret=jwt_secret_key)["user_uuid"]
+    edit_metadata = data['edit_metadata']
+
+    requestedUser = db_session_ac.query(UserMaster).filter_by(user_uuid=user_to_be_edited).first()
+
+    if requestedUser:
+
+        if(user_to_be_edited == requester_id):
+            try:
+                flag = True
+                for field, model_attr in user_update_fields.items():
+                    if field in edit_metadata and edit_metadata.get(field) is not None and flag:
+                        if(field == "is_admin"):
+                            if(utils.check_is_admin(request.headers)):
+                                setattr(requestedUser.user_metadata, model_attr.split('.')[-1], edit_metadata[field])
+                            else:
+                                flag = False
+                        else:
+                            setattr(requestedUser.user_metadata, model_attr.split('.')[-1], edit_metadata[field])
+                db_session_ac.commit()
+                if(flag):
+                    return jsonify({'message': 'User details edited successfully'}), 200
+                else:
+                    return jsonify({'message': 'Privillege escalation attempted'}), 403
+            except Exception as e:
+                logging.error(e)
+                return jsonify({'message': 'User details cannot be edited'}), 400
+        else:
+            if(utils.check_is_admin(request.headers)):
+                for field, model_attr in user_update_fields.items():
+                    if field in edit_metadata and edit_metadata.get(field) is not None:
+                        setattr(requestedUser.user_metadata, model_attr.split('.')[-1], edit_metadata[field])
+                db_session_ac.commit()
+                return jsonify({'message': 'User details edited successfully'}), 200
+            else:
+                return jsonify({'message': 'Cannot modify user'}), 400
+    
+    else:
+        return jsonify({'message': 'User not found'}), 404
+
+
+# problem end APIs
+
+@app.route("/get-problem-details/<string:problem_id>", methods=["GET"])
+@jwt_required()
+def get_problem_details(problem_id):
+    try:
+        if utils.check_is_admin(request.headers):
+            problem_statement_obj = db_session_ac.query(ProblemStatementMaster).filter_by(problem_statement_uuid=problem_id).first()
+            response = {
+                "problem_statement_uuid" : problem_statement_obj.problem_statement_uuid,
+                "problem_statement_title" : problem_statement_obj.problem_statement_metadata.problem_statement_title,
+                "problem_statement_body" : problem_statement_obj.problem_statement_metadata.problem_statement_body,
+                "problem_statement_duration" : problem_statement_obj.problem_statement_metadata.problem_statement_duration,
+                "problem_statement_tags": problem_statement_obj.problem_statement_metadata.problem_statement_tags,
+                "problem_statement_difficulty": problem_statement_obj.problem_statement_metadata.problem_statement_difficulty
+            }
+
+            test_cases = db_session_ac.query(ProblemStatementTestCases).filter_by(problem_statement_id=problem_statement_obj.problem_statement_id).all()
+
+            temp_list = []
+            for i in test_cases:
+                temp = {
+                    "test_case_id": i.test_case_id,
+                    "input": i.input,
+                    "expected_output": i.expected_output,
+                    "test_case_weightage": i.test_case_weightage,
+                    "is_hidden": i.is_hidden,
+                }
+                temp_list.append(temp)
+
+            response["test_cases"] = temp_list
+
+            return jsonify(response)
+        else:
+            return jsonify({"message": "You are unauthorized to perform this action"}), 403
+    except Exception as e:
+        logging.error(e)
+        return jsonify({"message": "Something went wrong"}), 500
+
+@app.route('/get-problem-list/', defaults={"problem_id": None}, methods=['GET'])
+@app.route('/get-problem-list/<string:problem_id>',  methods=['GET'])
+def get_problem_list(problem_id):
+    try:
+        # to fetch details of a problem
+        if(problem_id):
+            response = {}
+            problem_statement_obj = db_session_ac.query(ProblemStatementMaster).filter_by(problem_statement_uuid=problem_id).first()
+            response = {
+                "problem_statement_uuid" : problem_statement_obj.problem_statement_uuid,
+                "problem_statement_title" : problem_statement_obj.problem_statement_metadata.problem_statement_title,
+                "problem_statement_body" : problem_statement_obj.problem_statement_metadata.problem_statement_body,
+                "problem_statement_duration" : problem_statement_obj.problem_statement_metadata.problem_statement_duration,
+                "problem_statement_tags": problem_statement_obj.problem_statement_metadata.problem_statement_tags,
+                "problem_statement_difficulty": problem_statement_obj.problem_statement_metadata.problem_statement_difficulty
+            }
+        
+            return jsonify(response)
+
+        # to fetch problem list
+        else:
+            allProblemList = []
+            user_uuid = ""
+            if "refresh_token_cookie" in request.cookies:
+                user_uuid = utils.decode_token(request.headers["Authorization"].split()[1], jwt_secret_key)["user_uuid"]
+
+            allProblemObject = db_session_ac.query(ProblemStatementMaster).all()
+
+            for problems in allProblemObject:
+                if user_uuid != "":
+                    row = db_session_ac.query(UserMaster, UserDidProblem).filter(UserMaster.user_id == UserDidProblem.user_id).filter(UserMaster.user_uuid == user_uuid, UserDidProblem.problem_statement_id == problems.problem_statement_id).first()
+
+                    temp = {
+                        "problem_statement_uuid" : problems.problem_statement_uuid,
+                        "problem_statement_title" : problems.problem_statement_metadata.problem_statement_title,
+                        "problem_statement_body" : problems.problem_statement_metadata.problem_statement_body,
+                        "problem_statement_duration" : problems.problem_statement_metadata.problem_statement_duration,
+                        "problem_statement_tags": problems.problem_statement_metadata.problem_statement_tags,
+                        "problem_statement_difficulty": problems.problem_statement_metadata.problem_statement_difficulty,
+                        "problem_statement_status": "solved" if row else "unsolved"
+                    }
+                else:
+                    temp = {
+                        "problem_statement_uuid" : problems.problem_statement_uuid,
+                        "problem_statement_title" : problems.problem_statement_metadata.problem_statement_title,
+                        "problem_statement_body" : problems.problem_statement_metadata.problem_statement_body,
+                        "problem_statement_duration" : problems.problem_statement_metadata.problem_statement_duration,
+                        "problem_statement_tags": problems.problem_statement_metadata.problem_statement_tags,
+                        "problem_statement_difficulty": problems.problem_statement_metadata.problem_statement_difficulty
+                    }
+
+                allProblemList.append(temp)
+            
+            return jsonify(allProblemList)
+    
+    except Exception as e:
+        logging.error(e)
+        return jsonify({"message": "Something went wrong"}), 500
+
+@app.route('/add-problem', methods=['POST'])
+@jwt_required()
+def add_problem():
+    data = request.json
+    problem_statement_uuid = uuid.uuid4()
+    problem_statement_title = data['problem_statement_title']
+    problem_statement_body = data['problem_statement_body']
+    problem_statement_duration = data['problem_statement_duration']
+    problem_statement_difficulty = data['problem_statement_difficulty']
+    problem_statement_tags = data['problem_statement_tags']
+    test_case_data = data['test_cases']
+
+    new_problem_statement_master = ProblemStatementMaster(
+        problem_statement_uuid = problem_statement_uuid,
+        problem_statement_metadata = ProblemStatementMetadata(
+            problem_statement_title = problem_statement_title,
+            problem_statement_body= problem_statement_body,
+            problem_statement_duration = problem_statement_duration,
+            problem_statement_difficulty = problem_statement_difficulty,
+            problem_statement_tags = problem_statement_tags
+        )
+    )
+
+    try:
+        db_session_ac.add(new_problem_statement_master)
+        db_session_ac.commit()
+
+        if(test_case_data):
+            errorFlag = False
+
+            problem_statement_id = new_problem_statement_master.problem_statement_id
+
+            for ele in test_case_data:
+                tempObj = ProblemStatementTestCases(
+                    problem_statement_id=problem_statement_id,
+                    input=ele["input"],
+                    expected_output=ele["expected_output"],
+                    test_case_weightage=ele["test_case_weightage"],
+                    is_hidden=ele["is_hidden"]
+                )
+                try:
+                    db_session_ac.add(tempObj)
+                    db_session_ac.commit()
+                except Exception as e: 
+                    logging.error(e)
+                    db_session_ac.rollback()
+                    errorFlag = True
+            
+            if(errorFlag):
+                return jsonify({ 'message' : 'Something went wrong' }), 500
+            else:
+                return jsonify({'message' : 'Problem statement added successfully'})
+        
+        else:
+            return jsonify({'message': 'Problem statement added successfully'})
+    
+    except Exception as e:
+        logging.error(e)
+        db_session_ac.rollback()
+        return jsonify({'message': "Something went wrong"}), 500
+
+
+@app.route('/edit-problem', methods=['PUT'])
+@jwt_required()
+def edit_problem():
+    data = request.json
+    problem_to_be_edited = data['problem_to_be_edited']
+    edit_metadata = data['edit_metadata']
+
+    if(utils.check_is_admin(request.headers)):
+        requested_problem = db_session_ac.query(ProblemStatementMaster).filter_by(problem_statement_uuid=problem_to_be_edited).first()
+
+        try:
+            requested_problem.problem_statement_metadata.problem_statement_title = edit_metadata["problem_statement_title"]
+            requested_problem.problem_statement_metadata.problem_statement_body = edit_metadata["problem_statement_body"]
+            requested_problem.problem_statement_metadata.problem_statement_duration = edit_metadata["problem_statement_duration"]
+            requested_problem.problem_statement_metadata.problem_statement_difficulty = edit_metadata["problem_statement_difficulty"]
+            requested_problem.problem_statement_metadata.problem_statement_tags = edit_metadata["problem_statement_tags"]
+
+
+            requested_problem_test_cases = db_session_ac.query(ProblemStatementTestCases).filter_by(problem_statement_id=requested_problem.problem_statement_id).all()
+
+            for i in edit_metadata["test_cases"]:
+                # for new test cases
+                if i["test_case_id"] == "":
+                    new_test_case = ProblemStatementTestCases(problem_statement_id=requested_problem.problem_statement_id,
+                                                              input=i["input"],
+                                                              expected_output=i["expected_output"],
+                                                              test_case_weightage=i["test_case_weightage"],
+                                                              is_hidden=i["is_hidden"])
+                    
+                    db_session_ac.add(new_test_case)
+                
+                # for existing test cases
+                else:
+                    for j in requested_problem_test_cases:
+                        if i["test_case_id"] == j.test_case_id:
+                            j.input = i["input"]
+                            j.expected_output = i["expected_output"]
+                            j.test_case_weightage = i["test_case_weightage"]
+                            j.is_hidden = i["is_hidden"]
+
+                            break
+
+            db_session_ac.commit()
+            return jsonify({"message": "Problem statement updated successfully"})
+            
+                    
+        except Exception as e:
+            logging.error(e)
+            db_session_ac.rollback()
+            return jsonify({'message': 'Something went wrong'}), 500
+        
+    else:
+        return jsonify({'message' : 'You are unauthorized to perform the action'}), 403
+
+
+
+@app.route('/delete-problem', methods=['DELETE'])
+@jwt_required()
+def delete_problem():
+    data = request.json
+    requested_problem_id = data['requested_problem_id']
+
+    if(utils.check_is_admin(request.headers)):
+        requestedProblem = db_session_ac.query(ProblemStatementMaster).filter_by(problem_statement_uuid=requested_problem_id).first()
+        try:
+            db_session_ac.delete(requestedProblem)
+            db_session_ac.commit()
+            return jsonify({'message' : 'Problem statement deleted successfully'})
+        except Exception as e:
+            return jsonify({'message' : 'Something went wrong'}), 500
+    else:
+        return jsonify({'message' : 'You are unauthorized to perform the action'}), 403
+
+#get all test cases for problems
+# @app.route('/get-test-cases/<string:requested_problem_uuid>', methods=['GET'])
+# def get_test_cases(requested_problem_uuid):
+#     problem_data = db_session_ac.query(ProblemStatementMaster).filter_by(problem_statement_uuid=requested_problem_uuid).first()
+#     all_test_cases_obj_list = db_session_ac.query(ProblemStatementTestCases).filter_by(problem_statement_id=problem_data.problem_statement_id).all()
+#     res_json = []
+#     for ele in all_test_cases_obj_list:
+#         temp = {
+#             'test_case_id' : ele.test_case_id,
+#             'expected_input' :  ele.expected_input,
+#             'expected_output' : ele.expected_output,
+#             'test_case_weightage' : ele.test_case_weightage,
+#             'is_hidden' : ele.is_hidden
+#         }
+#         res_json.append(temp)
+#     return jsonify(res_json), 200
+
+# #create test cases for problems
+# @app.route('/add-test-cases', methods=['POST'])
+# @jwt_required()
+# def add_test_cases():
+#     '''
+#         expected request payload
+#         {
+#             problem_id : problem_uuid,
+#             test_cases : [
+#                 {
+#                     input : '',
+#                     output : '',
+#                     weightage : '',
+#                     hidden : ''
+#                 }, ...
+#             ]
+#         }
+#     '''
+#     data = request.json
+#     errorFlag = False
+#     problem_uuid = data['problem_id']
+#     problem_statement_id = db_session_ac.query(ProblemStatementMaster).filter_by(problem_statement_uuid=problem_uuid).first().problem_statement_id
+#     test_cases_array = data['test_cases']
+
+#     for ele in test_cases_array:
+#         tempObj = ProblemStatementTestCases(
+#             problem_statement_id=problem_statement_id,
+#             expected_input=ele.input,
+#             expected_output=ele.output,
+#             test_case_weightage=ele.weightage,
+#             is_hidden=ele.hidden
+#         )
+#         try:
+#             db_session_ac.add(tempObj)
+#             db_session_ac.commit()
+#         except Exception as e: 
+#             db_session_ac.rollback()
+#             errorFlag = True
+#     if(errorFlag):
+#         return jsonify({ 'message' : 'test cases not added successfully, please check with super admin for more info' }), 400
+#     else:
+#         return jsonify({'message' : 'added test cases for problem statement successfully'}), 200
+
+#edit test cases for problems
+# @app.route('/edit-test-cases', methods=['PUT'])
+# @jwt_required()
+# def edit_test_cases():
+#     data = request.json
+#     test_case_id = data['test_case_id']
+#     requester_id = data['requester_id']
+#     edit_metadata = data['edit_metadata']
+#     user_obj = db_session_ac.query(UserMaster).filter_by(user_uuid=requester_id).first()
+#     if(user_obj.user_metadata.is_admin):
+#         test_case_obj = db_session_ac.query(ProblemStatementTestCases).filter_by(test_case_id=test_case_id).first()
+#         for field, model_attr in problem_testcases_update_fields:
+#             if field in edit_metadata and edit_metadata.get(field) is not None:
+#                 setattr(test_case_obj, model_attr.split('.')[-1], edit_metadata[field])
+#         try:
+#             db_session_ac.add(test_case_obj)
+#             db_session_ac.commit()
+#             return jsonify({'message' : 'Test case details edited successfully'}),200
+#         except Exception as e:
+#             db_session_ac.rollback()
+#             return jsonify({'message' : 'Problem editing test case details'}),400
+#     else:
+#         return jsonify({'message': 'privillege escalation attempted'}), 403
+
+#delete test cases for problems
+@app.route('/delete-test-case', methods=['DELETE'])
+@jwt_required()
+def delete_test_cases():
+    data = request.json
+    test_case_id = data['test_case_id']
+
+    if(utils.check_is_admin(request.headers)):
+        test_case_obj = db_session_ac.query(ProblemStatementTestCases).filter_by(test_case_id=test_case_id).first()
+        try:
+            db_session_ac.delete(test_case_obj)
+            db_session_ac.commit()
+            return jsonify({'message' : 'Test case deleted successfully'}), 200
+        except Exception as e:
+            return jsonify({'message' : 'Something went wrong'}), 500
+    else:
+        return jsonify({'message': 'You are unauthorized to perform this action'}), 403
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", debug=True)
+
+
+----------------------------------
+
+
+
+Filename: /media/anurag/mybkp/coderrank/coderrank-service/Dockerfile
+
+FROM python:3.11-slim
+
+# Install dependencies for Docker and sshpass
+RUN apt-get update && apt-get install -y sshpass openssh-client
+
+# Set up working directory
+WORKDIR /app
+
+# Copy the application code
+COPY . .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+RUN mkdir /home/codes
+
+# Ensure scripts have the proper permissions
+RUN chmod 777 ./code-execute.sh
+
+# Expose the Flask app port
+EXPOSE 5000
+
+# Default command to run the Python app
+CMD ["python", "./app.py"]
+
+
+----------------------------------
+
+
+
+Filename: /media/anurag/mybkp/coderrank/coderrank-service/java-execute.sh
+
+#!/bin/bash
+
+# sshpass -p password scp -o StrictHostKeyChecking=no /app/Solution.java anurag@ip:/home/anurag/
+
+# command="echo password | sudo -S docker cp /home/anurag/codes/Solution.java code-exec-container:/home/ > /dev/null 2>/dev/null && echo password | sudo -S docker exec -i code-exec-container java /home/Solution.java < /home/anurag/codes/input.txt"
+dir_name=$1
+password=$2
+username=$3
+internal_ip=$4
+
+command="echo $password | sudo -S -p '' bash -c 'docker run --rm --network=none -i -v /home/anurag/codes/$dir_name:/app openjdk java /app/Solution.java < /home/anurag/codes/$dir_name/input.txt'"
+
+# sshpass -p password scp -o StrictHostKeyChecking=no /app/input.sql anurag@ip:/home/anurag/
+
+# command="echo password | sudo -S docker cp /home/anurag/input.sql pg-container:/home/ > /dev/null 2>/dev/null && echo password | sudo -S docker exec -i pg-container psql -U postgres -d postgres < input.sql > /home/anurag/output.txt 2>/dev/null && cat output.txt"
+
+output=`sshpass -p $password ssh -q -o StrictHostKeyChecking=no -t $username@$internal_ip $command`
+
+echo $output
+
+----------------------------------
+
+
+
+Filename: /media/anurag/mybkp/coderrank/coderrank-service/database_utils/Coderrank_DB.sql
+
+CREATE DATABASE coderrank_db
+    WITH
+    OWNER = postgres
+    ENCODING = 'UTF8'
+    LC_COLLATE = 'English_India.1252'
+    LC_CTYPE = 'English_India.1252'
+    LOCALE_PROVIDER = 'libc'
+    TABLESPACE = pg_default
+    CONNECTION LIMIT = -1
+    IS_TEMPLATE = False;
+
+COMMENT ON DATABASE coderrank_db
+    IS 'Coderrank DB';
+
+DROP TABLE IF EXISTS language_info CASCADE;
+DROP TABLE IF EXISTS problem_statement_master CASCADE;
+DROP TABLE IF EXISTS problem_statement_metadata CASCADE;
+DROP TABLE IF EXISTS problem_statement_test_cases CASCADE;
+DROP TABLE IF EXISTS user_master CASCADE;
+DROP TABLE IF EXISTS user_metadata CASCADE;
+DROP TABLE IF EXISTS user_did_problem CASCADE;
+DROP TABLE IF EXISTS test_cases_in_language CASCADE;
+
+-- Table: language_info
+CREATE TABLE language_info (
+  language_id BIGSERIAL PRIMARY KEY NOT NULL,
+  language_uuid VARCHAR,
+  language_name VARCHAR
+);
+
+-- Table: problem_statement_master
+CREATE TABLE problem_statement_master (
+  problem_statement_id BIGSERIAL PRIMARY KEY NOT NULL,
+  problem_statement_uuid VARCHAR
+);
+
+-- Table: problem_statement_metadata
+CREATE TABLE problem_statement_metadata (
+  problem_statement_id BIGSERIAL PRIMARY KEY NOT NULL,
+  problem_statement_title VARCHAR,
+  problem_statement_body TEXT,
+  problem_statement_duration INTEGER,
+  problem_statement_difficulty VARCHAR(10),
+  problem_statement_tags TEXT,
+  CONSTRAINT fk_problem_statement_metadata
+    FOREIGN KEY (problem_statement_id)
+    REFERENCES problem_statement_master(problem_statement_id)
+);
+
+-- Table: problem_statement_test_cases
+CREATE TABLE problem_statement_test_cases (
+  test_case_id BIGSERIAL PRIMARY KEY NOT NULL,
+  problem_statement_id INTEGER NOT NULL,
+  input VARCHAR,
+  expected_output VARCHAR,
+  test_case_weightage INTEGER,
+  is_hidden BOOLEAN,
+  CONSTRAINT fk_problem_statement_test_cases_problem
+    FOREIGN KEY (problem_statement_id)
+    REFERENCES problem_statement_master(problem_statement_id)
+);
+
+-- Table: user_master
+CREATE TABLE user_master (
+  user_id BIGSERIAL PRIMARY KEY NOT NULL,
+  user_uuid VARCHAR
+);
+
+-- Table: user_metadata
+CREATE TABLE user_metadata (
+  user_id BIGSERIAL PRIMARY KEY NOT NULL,
+  user_name VARCHAR,
+  user_alias VARCHAR,
+  user_password VARCHAR,
+  user_phone_no VARCHAR,
+  user_email VARCHAR,
+  no_of_times_user_login INTEGER,
+  no_of_problems_solved INTEGER,
+  is_admin BOOLEAN,
+  CONSTRAINT fk_user_metadata
+    FOREIGN KEY (user_id)
+    REFERENCES user_master(user_id)
+);
+
+-- Table: user_did_problem
+CREATE TABLE user_did_problem (
+  user_id INTEGER NOT NULL,
+  problem_statement_id INTEGER NOT NULL,
+  code TEXT NOT NULL,
+  test_cases_passed INTEGER NOT NULL,
+  total_test_cases INTEGER NOT NULL,
+  language_id INTEGER NOT NULL,
+  PRIMARY KEY (user_id, problem_statement_id, language_id),
+  CONSTRAINT fk_user_did_problem_user
+    FOREIGN KEY (user_id)
+    REFERENCES user_master(user_id),
+  CONSTRAINT fk_user_did_problem_problem
+    FOREIGN KEY (problem_statement_id)
+    REFERENCES problem_statement_master(problem_statement_id),
+  CONSTRAINT fk_user_did_problem_language_info
+    FOREIGN KEY (language_id)
+    REFERENCES language_info(language_id)
+);
+
+CREATE TABLE public.blacklisted_tokens (
+	id bigserial NOT NULL,
+	blacklisted_token varchar NULL,
+	blacklisted_timestamp timestamp NULL,
+	CONSTRAINT blacklisted_tokens_pkey PRIMARY KEY (id)
+);
+
+----------------------------------
+
+
+
+Filename: /media/anurag/mybkp/coderrank/coderrank-service/database_utils/dbUtils.py
+
+user_update_fields = {
+    "full_name" : "user_metadata.user_name",
+    "user_alias" : "user_metadata.user_alias",
+    "user_password" : "user_metadata.user_password",
+    "phone_no" : "user_metadata.user_phone_no",
+    "email" : "user_metadata.user_email",
+    "no_of_times_user_login" : "user_metadata.no_of_times_user_login",
+    "no_of_problems_solved" : "user_metadata.no_of_problems_solved" ,
+    "is_admin" : "user_metadata.is_admin"
+}
+
+problem_update_fields = {
+    "statement_body": "problem_statement_metadata.problem_statement_body",
+    "sample_input": "problem_statement_metadata.sample_input",
+    "sample_output": "problem_statement_metadata.sample_output",
+    "duration": "problem_statement_metadata.problem_duration",
+    "no_of_test_cases": "problem_statement_metadata.no_of_test_cases"
+}
+
+problem_testcases_update_fields = {
+    "expected_input": "problem_statement_test_cases.expected_input",
+    "expected_output": "problem_statement_test_cases.expected_output",
+    "test_case_weightage": "problem_statement_test_cases.test_case_weightage",
+    "is_hidden": "problem_statement_test_cases.is_hidden",
+}
+
+----------------------------------
+
+
+
+Filename: /media/anurag/mybkp/coderrank/coderrank-service/database_utils/models.py
+
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy import Column, DateTime, Integer, String, Boolean, ForeignKey, Text
+from sqlalchemy.orm import relationship
+from datetime import datetime
+
+Base = declarative_base()
+
+class UserMetadata(Base):
+    __tablename__ = "user_metadata"
+
+    user_id = Column(Integer,ForeignKey('user_master.user_id'), primary_key=True, autoincrement=True)
+    user_name = Column(String)
+    user_alias = Column(String)
+    user_password = Column(String)
+    user_phone_no = Column(String)
+    user_email = Column(String)
+    no_of_times_user_login = Column(Integer)
+    no_of_problems_solved = Column(Integer)
+    is_admin = Column(Boolean)
+
+    user_master = relationship("UserMaster", back_populates="user_metadata")
+
+class UserMaster(Base):
+    __tablename__ = "user_master"
+
+    user_id = Column(Integer, primary_key=True, autoincrement=True)
+    user_uuid = Column(String)
+
+    user_metadata = relationship("UserMetadata", back_populates="user_master", uselist=False, cascade="all, delete")
+
+class LanguageInfo(Base):
+    __tablename__ = "language_info"
+
+    language_id = Column(Integer, primary_key=True, autoincrement=True)
+    language_name = Column(String)
+
+    user_did_problem = relationship("UserDidProblem", back_populates="language_info", uselist=False, cascade="all, delete")
+
+class UserDidProblem(Base):
+    __tablename__ = "user_did_problem"
+
+    user_id = Column(Integer, primary_key=True)
+    problem_statement_id = Column(Integer, primary_key=True)
+    language_id = Column(Integer, ForeignKey('language_info.language_id'), primary_key=True)
+    code = Column(String, nullable=False)
+    test_cases_passed = Column(Integer, nullable=False)
+    total_test_cases = Column(Integer, nullable=False)
+
+    language_info = relationship("LanguageInfo", back_populates="user_did_problem")
+
+class ProblemStatementTestCases(Base):
+
+    __tablename__ = "problem_statement_test_cases"
+    test_case_id = Column(Integer, primary_key=True, autoincrement=True)
+    problem_statement_id = Column(Integer, ForeignKey('problem_statement_master.problem_statement_id'))
+    input = Column(String)
+    expected_output = Column(String)
+    test_case_weightage = Column(Integer)
+    is_hidden = Column(Boolean)
+
+    problem_statement_master = relationship("ProblemStatementMaster", back_populates="problem_statement_test_cases")
+
+class ProblemStatementMaster(Base):
+
+    __tablename__ = "problem_statement_master"
+
+    problem_statement_id = Column(Integer, primary_key=True, autoincrement=True)
+    problem_statement_uuid = Column(String)
+    
+    problem_statement_metadata = relationship("ProblemStatementMetadata", back_populates="problem_statement_master", uselist=False, cascade="all, delete")
+
+    problem_statement_test_cases = relationship("ProblemStatementTestCases", back_populates="problem_statement_master", cascade="all, delete")
+
+class ProblemStatementMetadata(Base):
+
+    __tablename__ = "problem_statement_metadata"
+
+    problem_statement_id = Column(Integer, ForeignKey('problem_statement_master.problem_statement_id'), primary_key=True, autoincrement=True)
+    problem_statement_title = Column(String)
+    problem_statement_body = Column(Text)
+    problem_statement_duration = Column(Integer)
+    problem_statement_difficulty = Column(String)
+    problem_statement_tags = Column(Text)
+
+    problem_statement_master = relationship("ProblemStatementMaster", back_populates="problem_statement_metadata")
+
+class BlacklistedTokens(Base):
+    __tablename__ = "blacklisted_tokens"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    blacklisted_token = Column(String)
+    blacklisted_timestamp = Column(DateTime)
+
+
+----------------------------------
+
